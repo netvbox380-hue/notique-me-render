@@ -40,14 +40,25 @@ import {
 } from "lucide-react";
 import InstallAppButton from "@/components/InstallAppButton";
 
-async function setBadgeCount(n: number) {
+type PushPrefs = {
+  vibrate: boolean;
+  sound: boolean;
+};
+
+type FeedbackKey = "liked" | "disliked" | "renew" | "no_renew" | "problem";
+
+async function setBadgeCount(count: number) {
   try {
     // @ts-ignore
-    if ("setAppBadge" in navigator) await navigator.setAppBadge(n);
+    if ("setAppBadge" in navigator) await navigator.setAppBadge(count);
   } catch {}
+
   try {
     if (navigator.serviceWorker?.controller) {
-      navigator.serviceWorker.controller.postMessage({ type: "SET_BADGE", count: n });
+      navigator.serviceWorker.controller.postMessage({
+        type: "SET_BADGE",
+        count,
+      });
     }
   } catch {}
 }
@@ -57,6 +68,7 @@ async function clearBadgeCount() {
     // @ts-ignore
     if ("clearAppBadge" in navigator) await navigator.clearAppBadge();
   } catch {}
+
   try {
     if (navigator.serviceWorker?.controller) {
       navigator.serviceWorker.controller.postMessage({ type: "CLEAR_BADGE" });
@@ -64,24 +76,32 @@ async function clearBadgeCount() {
   } catch {}
 }
 
-function loadPushPrefs() {
+function loadPushPrefs(): PushPrefs {
   try {
     const raw = localStorage.getItem("nm_push_prefs");
     if (!raw) return { vibrate: true, sound: true };
-    const j = JSON.parse(raw);
-    return { vibrate: j?.vibrate !== false, sound: j?.sound !== false };
+
+    const parsed = JSON.parse(raw);
+    return {
+      vibrate: parsed?.vibrate !== false,
+      sound: parsed?.sound !== false,
+    };
   } catch {
     return { vibrate: true, sound: true };
   }
 }
 
-function savePushPrefs(p: { vibrate: boolean; sound: boolean }) {
+function savePushPrefs(prefs: PushPrefs) {
   try {
-    localStorage.setItem("nm_push_prefs", JSON.stringify(p));
+    localStorage.setItem("nm_push_prefs", JSON.stringify(prefs));
   } catch {}
+
   try {
     if (navigator.serviceWorker?.controller) {
-      navigator.serviceWorker.controller.postMessage({ type: "SET_PUSH_PREFS", prefs: p });
+      navigator.serviceWorker.controller.postMessage({
+        type: "SET_PUSH_PREFS",
+        prefs,
+      });
     }
   } catch {}
 }
@@ -89,16 +109,26 @@ function savePushPrefs(p: { vibrate: boolean; sound: boolean }) {
 function toWhatsAppUrl(phone?: string | null, message?: string) {
   const digits = String(phone || "").replace(/\D/g, "");
   if (!digits) return "";
-  const text = message?.trim() ? `?text=${encodeURIComponent(message.trim())}` : "";
+
+  const text = message?.trim()
+    ? `?text=${encodeURIComponent(message.trim())}`
+    : "";
+
   return `https://wa.me/${digits}${text}`;
 }
 
-const FEEDBACK_META: Record<string, { icon: React.ReactNode; label: string }> = {
+const FEEDBACK_META: Record<
+  FeedbackKey,
+  { icon: React.ReactNode; label: string }
+> = {
   liked: { icon: <ThumbsUp className="w-4 h-4" />, label: "Gostei" },
   disliked: { icon: <ThumbsDown className="w-4 h-4" />, label: "Não gostei" },
   renew: { icon: <RefreshCcw className="w-4 h-4" />, label: "Vou renovar" },
   no_renew: { icon: <Ban className="w-4 h-4" />, label: "Não vou renovar" },
-  problem: { icon: <AlertTriangle className="w-4 h-4" />, label: "Estou tendo problemas" },
+  problem: {
+    icon: <AlertTriangle className="w-4 h-4" />,
+    label: "Estou tendo problemas",
+  },
 };
 
 export default function UserNotifications() {
@@ -107,27 +137,29 @@ export default function UserNotifications() {
 
   const [filter, setFilter] = useState<"unread" | "all">("unread");
   const [pageSize, setPageSize] = useState(20);
-  const [pushPrefs, setPushPrefs] = useState(() => loadPushPrefs());
+  const [pushPrefs, setPushPrefs] = useState<PushPrefs>(() => loadPushPrefs());
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   const [attachmentsNotificationId, setAttachmentsNotificationId] = useState<number | null>(null);
-  const [attachmentsTitle, setAttachmentsTitle] = useState<string>("Anexos");
+  const [attachmentsTitle, setAttachmentsTitle] = useState("Anexos");
   const [openingDeliveryId, setOpeningDeliveryId] = useState<number | null>(null);
   const [isMediaPlaying, setIsMediaPlaying] = useState(false);
+  const [showNewIndicator, setShowNewIndicator] = useState(false);
 
   const pendingRefreshRef = useRef(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const lastTopIdRef = useRef<number | null>(null);
 
   const subscription = trpc.tenant.getSubscription.useQuery(undefined, {
     refetchOnWindowFocus: false,
   });
 
-  const currentGroupsQuery = trpc.tenant.getCurrentUserGroups.useQuery(undefined, {
-    refetchOnWindowFocus: false,
-  });
-
   const attachmentsQuery = trpc.files.listByNotificationId.useQuery(
     { notificationId: attachmentsNotificationId ?? 0 },
-    { enabled: attachmentsOpen && Boolean(attachmentsNotificationId), refetchOnWindowFocus: false }
+    {
+      enabled: attachmentsOpen && Boolean(attachmentsNotificationId),
+      refetchOnWindowFocus: false,
+    }
   );
 
   const inbox = trpc.notifications.inboxList.useQuery(
@@ -157,6 +189,7 @@ export default function UserNotifications() {
       pendingRefreshRef.current = true;
       return;
     }
+
     await invalidateInboxNow();
   }, [invalidateInboxNow, isMediaPlaying]);
 
@@ -180,11 +213,7 @@ export default function UserNotifications() {
 
   const setFeedback = trpc.notifications.setFeedback.useMutation({
     onSuccess: async () => {
-      if (isMediaPlaying) {
-        pendingRefreshRef.current = true;
-      } else {
-        await utils.notifications.inboxList.invalidate();
-      }
+      await invalidateInbox();
       toast.success("Resposta enviada.");
     },
   });
@@ -199,7 +228,11 @@ export default function UserNotifications() {
     },
   });
 
-  const brandName = subscription.data?.branding?.brandName || subscription.data?.name || "Admin";
+  const brandName =
+    subscription.data?.branding?.brandName ||
+    subscription.data?.name ||
+    "Admin";
+
   const brandLogoUrl = subscription.data?.branding?.brandLogoUrl || "";
   const supportPhone = subscription.data?.branding?.supportPhone || "";
   const supportUrl = toWhatsAppUrl(
@@ -207,29 +240,27 @@ export default function UserNotifications() {
     "Olá! Preciso de ajuda com as notificações do app."
   );
 
-  const currentGroups = currentGroupsQuery.data?.groups ?? [];
-
   const items = useMemo(() => inbox.data?.data ?? [], [inbox.data]);
-  const unreadCount = inboxCountQuery.data?.count ?? items.filter((m: any) => !m.isRead).length;
+
+  const unreadCount =
+    inboxCountQuery.data?.count ??
+    items.filter((item: any) => !item.isRead).length;
 
   const visibleItems = useMemo(() => {
     if (filter === "all") return items;
-    return items.filter((m: any) => !m.isRead);
+    return items.filter((item: any) => !item.isRead);
   }, [items, filter]);
 
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const lastTopIdRef = useRef<number | null>(null);
-  const [showNewIndicator, setShowNewIndicator] = useState(false);
-
-  const scrollToTop = () => {
+  const scrollToTop = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
+
     try {
       el.scrollTo({ top: 0, behavior: "smooth" });
     } catch {
       el.scrollTop = 0;
     }
-  };
+  }, []);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -249,7 +280,7 @@ export default function UserNotifications() {
 
     const syncPlayingState = () => {
       const anyPlaying = Array.from(root.querySelectorAll("video")).some(
-        (v) => !v.paused && !v.ended && v.readyState > 2
+        (video) => !video.paused && !video.ended && video.readyState > 2
       );
       setIsMediaPlaying(anyPlaying);
     };
@@ -289,26 +320,32 @@ export default function UserNotifications() {
       toast("Nova mensagem recebida");
 
       try {
-        const p = pushPrefs;
-        if (p?.vibrate && "vibrate" in navigator) {
+        if (pushPrefs.vibrate && "vibrate" in navigator) {
           // @ts-ignore
           navigator.vibrate?.([50, 25, 50]);
         }
-        if (p?.sound) {
-          const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+
+        if (pushPrefs.sound) {
+          const AudioCtx =
+            (window as any).AudioContext ||
+            (window as any).webkitAudioContext;
+
           if (AudioCtx) {
             const ctx = new AudioCtx();
-            const o = ctx.createOscillator();
-            const g = ctx.createGain();
-            o.type = "sine";
-            o.frequency.value = 880;
-            g.gain.value = 0.03;
-            o.connect(g);
-            g.connect(ctx.destination);
-            o.start();
+            const oscillator = ctx.createOscillator();
+            const gain = ctx.createGain();
+
+            oscillator.type = "sine";
+            oscillator.frequency.value = 880;
+            gain.gain.value = 0.03;
+
+            oscillator.connect(gain);
+            gain.connect(ctx.destination);
+            oscillator.start();
+
             setTimeout(() => {
               try {
-                o.stop();
+                oscillator.stop();
                 ctx.close?.();
               } catch {}
             }, 120);
@@ -316,43 +353,60 @@ export default function UserNotifications() {
         }
       } catch {}
 
-      if (!showNewIndicator && !isMediaPlaying) scrollToTop();
+      if (!showNewIndicator && !isMediaPlaying) {
+        scrollToTop();
+      }
     }
-  }, [items, pushPrefs, showNewIndicator, isMediaPlaying]);
+  }, [items, pushPrefs, showNewIndicator, isMediaPlaying, scrollToTop]);
 
   useEffect(() => {
     if (typeof unreadCount !== "number") return;
-    if (unreadCount > 0) void setBadgeCount(unreadCount);
-    else void clearBadgeCount();
+
+    if (unreadCount > 0) {
+      void setBadgeCount(unreadCount);
+    } else {
+      void clearBadgeCount();
+    }
   }, [unreadCount]);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
 
-    const onMsg = (event: MessageEvent) => {
+    const onMessage = (event: MessageEvent) => {
       const data: any = event?.data || {};
+
       if (data?.type === "PUSH_PING") {
         try {
-          localStorage.setItem("nm_push_last_ping", String(data.ts || Date.now()));
+          localStorage.setItem(
+            "nm_push_last_ping",
+            String(data.ts || Date.now())
+          );
         } catch {}
+
         void invalidateInbox();
       }
     };
 
-    navigator.serviceWorker.addEventListener("message", onMsg);
-    return () => navigator.serviceWorker.removeEventListener("message", onMsg);
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener("message", onMessage);
+    };
   }, [invalidateInbox]);
 
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState === "visible") void invalidateInbox();
+      if (document.visibilityState === "visible") {
+        void invalidateInbox();
+      }
     };
+
     const onFocus = () => {
       void invalidateInbox();
     };
 
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onFocus);
+
     return () => {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onFocus);
@@ -370,15 +424,15 @@ export default function UserNotifications() {
     } finally {
       try {
         if ("serviceWorker" in navigator) {
-          const regs = await navigator.serviceWorker.getRegistrations();
-          await Promise.all(regs.map((r) => r.unregister()));
+          const registrations = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(registrations.map((registration) => registration.unregister()));
         }
       } catch {}
 
       try {
         if ("caches" in window) {
           const keys = await caches.keys();
-          await Promise.all(keys.map((k) => caches.delete(k)));
+          await Promise.all(keys.map((key) => caches.delete(key)));
         }
       } catch {}
 
@@ -386,11 +440,21 @@ export default function UserNotifications() {
     }
   }
 
-  async function handleOpenNotification(m: any) {
-    if (m.isRead || openingDeliveryId === Number(m.deliveryId) || markAsRead.isPending) return;
-    setOpeningDeliveryId(Number(m.deliveryId));
+  async function handleOpenNotification(notification: any) {
+    const deliveryId = Number(notification.deliveryId);
+
+    if (
+      notification.isRead ||
+      openingDeliveryId === deliveryId ||
+      markAsRead.isPending
+    ) {
+      return;
+    }
+
+    setOpeningDeliveryId(deliveryId);
+
     try {
-      await markAsRead.mutateAsync({ deliveryId: Number(m.deliveryId) });
+      await markAsRead.mutateAsync({ deliveryId });
     } catch {
       toast.error("Não foi possível marcar a mensagem como lida.");
     } finally {
@@ -398,7 +462,9 @@ export default function UserNotifications() {
     }
   }
 
-  if (inbox.isLoading && !items.length) return <div className="p-4">Carregando…</div>;
+  if (inbox.isLoading && !items.length) {
+    return <div className="p-4">Carregando…</div>;
+  }
 
   return (
     <>
@@ -410,7 +476,9 @@ export default function UserNotifications() {
               onClick={() => setFilter("unread")}
               className={
                 "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs transition " +
-                (filter === "unread" ? "bg-primary text-primary-foreground" : "bg-background")
+                (filter === "unread"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background")
               }
             >
               Não lidas
@@ -424,7 +492,9 @@ export default function UserNotifications() {
               onClick={() => setFilter("all")}
               className={
                 "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs transition " +
-                (filter === "all" ? "bg-primary text-primary-foreground" : "bg-background")
+                (filter === "all"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background")
               }
             >
               Todas
@@ -448,7 +518,12 @@ export default function UserNotifications() {
           </div>
 
           <div className="flex items-center justify-end">
-            <Button type="button" variant="outline" onClick={() => setPrefsOpen(true)} aria-label="Abrir menu">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setPrefsOpen(true)}
+              aria-label="Abrir menu"
+            >
               <Settings className="w-4 h-4" />
               <span className="ml-2 hidden sm:inline">Menu</span>
             </Button>
@@ -472,6 +547,7 @@ export default function UserNotifications() {
                   {String(brandName || "A").slice(0, 1).toUpperCase()}
                 </div>
               )}
+
               <div className="min-w-0">
                 <div className="text-sm font-semibold truncate">{brandName}</div>
                 <div className="text-xs text-muted-foreground">
@@ -482,8 +558,11 @@ export default function UserNotifications() {
 
             <div className="flex items-center gap-2 justify-between sm:justify-end">
               <div className="text-xs text-muted-foreground">
-                {filter === "unread" ? `${visibleItems.length} não lidas` : `${visibleItems.length} mensagens`}
+                {filter === "unread"
+                  ? `${visibleItems.length} não lidas`
+                  : `${visibleItems.length} mensagens`}
               </div>
+
               {supportUrl ? (
                 <a
                   href={supportUrl}
@@ -498,34 +577,58 @@ export default function UserNotifications() {
             </div>
           </div>
 
-          <div ref={containerRef} className="p-4 sm:p-6 space-y-3 max-h-[70vh] overflow-y-auto">
+          <div
+            ref={containerRef}
+            className="p-4 sm:p-6 space-y-3 max-h-[70vh] overflow-y-auto"
+          >
             {visibleItems.length === 0 ? (
               <div className="rounded-2xl border border-dashed p-8 text-center text-sm text-muted-foreground">
                 Nenhuma mensagem para mostrar agora.
               </div>
             ) : null}
 
-            {visibleItems.map((m: any) => {
-              const dt = new Date(m.createdAt);
-              const dateStr = dt.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
-              const timeStr = dt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+            {visibleItems.map((message: any) => {
+              const dt = new Date(message.createdAt);
+              const dateStr = dt.toLocaleDateString("pt-BR", {
+                day: "2-digit",
+                month: "2-digit",
+                year: "numeric",
+              });
+              const timeStr = dt.toLocaleTimeString("pt-BR", {
+                hour: "2-digit",
+                minute: "2-digit",
+              });
+
               const when = `${dateStr} às ${timeStr}`;
-              const sender = (m.senderName || m.senderEmail || m.senderOpenId || brandName || "Admin").toString();
-              const mediaUrl = m.imageUrl ? String(m.imageUrl) : undefined;
-              const currentFeedback = m.feedback ? String(m.feedback) : "";
+              const sender = (
+                message.senderName ||
+                message.senderEmail ||
+                message.senderOpenId ||
+                brandName ||
+                "Admin"
+              ).toString();
+
+              const mediaUrl = message.imageUrl
+                ? String(message.imageUrl)
+                : undefined;
+
+              const currentFeedback = message.feedback
+                ? String(message.feedback)
+                : "";
+
               const hasFeedback = Boolean(currentFeedback);
 
               return (
-                <div key={m.deliveryId} className="flex justify-start">
+                <div key={message.deliveryId} className="flex justify-start">
                   <div className="w-full">
                     <div
                       className={
                         "w-full rounded-2xl px-4 py-4 border shadow-sm transition cursor-pointer " +
-                        (!m.isRead
+                        (!message.isRead
                           ? "border-red-500/40 bg-zinc-900/70 ring-1 ring-red-500/15"
                           : "border-border bg-card")
                       }
-                      onClick={() => void handleOpenNotification(m)}
+                      onClick={() => void handleOpenNotification(message)}
                     >
                       <div className="flex items-start justify-between gap-3 mb-3">
                         <div className="min-w-0 flex items-start gap-3">
@@ -546,9 +649,15 @@ export default function UserNotifications() {
 
                           <div className="min-w-0">
                             <div className="min-w-0 text-xs text-muted-foreground truncate flex items-center gap-2 flex-wrap">
-                              {!m.isRead ? <span className="inline-block w-2 h-2 rounded-full bg-red-500" /> : null}
-                              <span className="font-medium text-foreground">{sender}</span>
-                              {!m.isRead ? (
+                              {!message.isRead ? (
+                                <span className="inline-block w-2 h-2 rounded-full bg-red-500" />
+                              ) : null}
+
+                              <span className="font-medium text-foreground">
+                                {sender}
+                              </span>
+
+                              {!message.isRead ? (
                                 <span className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] text-red-200">
                                   não lida
                                 </span>
@@ -558,30 +667,41 @@ export default function UserNotifications() {
                                 </span>
                               )}
                             </div>
-                            <div className="mt-1 text-sm font-semibold break-words">{m.title}</div>
+
+                            <div className="mt-1 text-sm font-semibold break-words">
+                              {message.title}
+                            </div>
                           </div>
                         </div>
-                        <div className="shrink-0 text-xs text-muted-foreground">{when}</div>
+
+                        <div className="shrink-0 text-xs text-muted-foreground">
+                          {when}
+                        </div>
                       </div>
 
-                      {m.content ? <div className="text-sm whitespace-pre-wrap break-words">{m.content}</div> : null}
+                      {message.content ? (
+                        <div className="text-sm whitespace-pre-wrap break-words">
+                          {message.content}
+                        </div>
+                      ) : null}
 
                       {mediaUrl ? (
                         <div
                           onClick={(e) => {
                             e.stopPropagation();
-                            void handleOpenNotification(m);
+                            void handleOpenNotification(message);
                           }}
                           className="space-y-2 mt-3"
                         >
-                          <MediaViewer url={mediaUrl} title={m.title} />
+                          <MediaViewer url={mediaUrl} title={message.title} />
+
                           <Button
                             type="button"
                             variant="outline"
                             size="sm"
                             onClick={() => {
-                              setAttachmentsTitle(m.title || "Anexos");
-                              setAttachmentsNotificationId(Number(m.notificationId));
+                              setAttachmentsTitle(message.title || "Anexos");
+                              setAttachmentsNotificationId(Number(message.notificationId));
                               setAttachmentsOpen(true);
                             }}
                           >
@@ -590,25 +710,36 @@ export default function UserNotifications() {
                         </div>
                       ) : null}
 
-                      <div className="mt-4 flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                        {(["liked", "disliked", "renew", "no_renew", "problem"] as const).map((fb) => {
-                          const active = currentFeedback === fb;
+                      <div
+                        className="mt-4 flex flex-wrap items-center gap-2"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {(
+                          ["liked", "disliked", "renew", "no_renew", "problem"] as const
+                        ).map((feedbackKey) => {
+                          const active = currentFeedback === feedbackKey;
+
                           return (
                             <button
-                              key={fb}
+                              key={feedbackKey}
                               type="button"
                               className={
                                 "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs transition " +
-                                (active ? "bg-primary text-primary-foreground" : "bg-background")
+                                (active
+                                  ? "bg-primary text-primary-foreground"
+                                  : "bg-background")
                               }
                               disabled={setFeedback.isPending || hasFeedback}
                               onClick={() => {
-                                setFeedback.mutate({ deliveryId: Number(m.deliveryId), feedback: fb });
+                                setFeedback.mutate({
+                                  deliveryId: Number(message.deliveryId),
+                                  feedback: feedbackKey,
+                                });
                               }}
-                              aria-label={`Marcar como ${fb}`}
+                              aria-label={`Marcar como ${feedbackKey}`}
                             >
-                              {FEEDBACK_META[fb]?.icon}
-                              {FEEDBACK_META[fb]?.label ?? fb}
+                              {FEEDBACK_META[feedbackKey].icon}
+                              {FEEDBACK_META[feedbackKey].label}
                             </button>
                           );
                         })}
@@ -617,12 +748,15 @@ export default function UserNotifications() {
                       {hasFeedback ? (
                         <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300">
                           <Check className="w-3.5 h-3.5" />
-                          Resposta enviada: {FEEDBACK_META[currentFeedback]?.label || currentFeedback}
+                          Resposta enviada:{" "}
+                          {FEEDBACK_META[currentFeedback as FeedbackKey]?.label ||
+                            currentFeedback}
                         </div>
                       ) : null}
 
                       <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                         <span>{when}</span>
+
                         {supportUrl ? (
                           <a
                             href={supportUrl}
@@ -644,7 +778,11 @@ export default function UserNotifications() {
 
             {items.length >= pageSize ? (
               <div className="pt-2 flex justify-center">
-                <Button type="button" variant="outline" onClick={() => setPageSize((v) => v + 20)}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setPageSize((value) => value + 20)}
+                >
                   Carregar mais mensagens
                 </Button>
               </div>
@@ -669,18 +807,28 @@ export default function UserNotifications() {
           </DialogHeader>
 
           {attachmentsQuery.isLoading ? (
-            <div className="text-sm text-muted-foreground">Carregando anexos...</div>
-          ) : attachmentsQuery.data?.success && (attachmentsQuery.data as any).data?.length ? (
+            <div className="text-sm text-muted-foreground">
+              Carregando anexos...
+            </div>
+          ) : attachmentsQuery.data?.success &&
+            (attachmentsQuery.data as any).data?.length ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {(attachmentsQuery.data as any).data.map((f: any) => (
-                <div key={f.id} className="rounded-xl border p-2">
-                  <MediaViewer url={String(f.fileKey || f.url)} title={f.filename || attachmentsTitle} />
-                  <div className="mt-2 text-xs text-muted-foreground break-all">{f.filename}</div>
+              {(attachmentsQuery.data as any).data.map((file: any) => (
+                <div key={file.id} className="rounded-xl border p-2">
+                  <MediaViewer
+                    url={String(file.fileKey || file.url)}
+                    title={file.filename || attachmentsTitle}
+                  />
+                  <div className="mt-2 text-xs text-muted-foreground break-all">
+                    {file.filename}
+                  </div>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="text-sm text-muted-foreground">Nenhum anexo encontrado.</div>
+            <div className="text-sm text-muted-foreground">
+              Nenhum anexo encontrado.
+            </div>
           )}
         </DialogContent>
       </Dialog>
@@ -706,6 +854,7 @@ export default function UserNotifications() {
                 <div className="text-xs text-muted-foreground">
                   Logo e WhatsApp agora ficam integrados à inbox do usuário final.
                 </div>
+
                 <div className="flex items-center gap-3">
                   {brandLogoUrl ? (
                     <img
@@ -717,14 +866,23 @@ export default function UserNotifications() {
                       }}
                     />
                   ) : null}
+
                   <div className="min-w-0">
                     <div className="font-medium truncate">{brandName}</div>
+
                     {supportUrl ? (
-                      <a href={supportUrl} target="_blank" rel="noreferrer" className="text-sm text-emerald-400 hover:underline">
+                      <a
+                        href={supportUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sm text-emerald-400 hover:underline"
+                      >
                         {supportPhone || "WhatsApp"}
                       </a>
                     ) : (
-                      <div className="text-xs text-muted-foreground">Sem WhatsApp cadastrado.</div>
+                      <div className="text-xs text-muted-foreground">
+                        Sem WhatsApp cadastrado.
+                      </div>
                     )}
                   </div>
                 </div>
@@ -733,25 +891,43 @@ export default function UserNotifications() {
               <div className="space-y-2">
                 <label className="flex items-center justify-between gap-3 rounded-xl border p-3">
                   <div>
-                    <div className="text-sm font-medium">Som ao receber mensagem</div>
-                    <div className="text-xs text-muted-foreground">Apenas quando o app está aberto</div>
+                    <div className="text-sm font-medium">
+                      Som ao receber mensagem
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Apenas quando o app está aberto
+                    </div>
                   </div>
+
                   <input
                     type="checkbox"
                     checked={pushPrefs.sound}
-                    onChange={(e) => setPushPrefs((p) => ({ ...p, sound: e.target.checked }))}
+                    onChange={(e) =>
+                      setPushPrefs((prev) => ({
+                        ...prev,
+                        sound: e.target.checked,
+                      }))
+                    }
                   />
                 </label>
 
                 <label className="flex items-center justify-between gap-3 rounded-xl border p-3">
                   <div>
                     <div className="text-sm font-medium">Vibração</div>
-                    <div className="text-xs text-muted-foreground">App aberto e (quando possível) no push</div>
+                    <div className="text-xs text-muted-foreground">
+                      App aberto e (quando possível) no push
+                    </div>
                   </div>
+
                   <input
                     type="checkbox"
                     checked={pushPrefs.vibrate}
-                    onChange={(e) => setPushPrefs((p) => ({ ...p, vibrate: e.target.checked }))}
+                    onChange={(e) =>
+                      setPushPrefs((prev) => ({
+                        ...prev,
+                        vibrate: e.target.checked,
+                      }))
+                    }
                   />
                 </label>
               </div>
@@ -761,13 +937,20 @@ export default function UserNotifications() {
                   <Wifi className="w-4 h-4" />
                   Monitor de push
                 </div>
+
                 <div className="mt-2 text-xs text-muted-foreground">
                   {(() => {
                     try {
-                      const ts = Number(localStorage.getItem("nm_push_last_ping") || 0);
-                      if (!ts) return "Ainda não recebemos nenhum push nesta instalação.";
-                      const d = new Date(ts);
-                      return `Último ping: ${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+                      const ts = Number(
+                        localStorage.getItem("nm_push_last_ping") || 0
+                      );
+
+                      if (!ts) {
+                        return "Ainda não recebemos nenhum push nesta instalação.";
+                      }
+
+                      const date = new Date(ts);
+                      return `Último ping: ${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
                     } catch {
                       return "Monitor indisponível.";
                     }
@@ -777,9 +960,15 @@ export default function UserNotifications() {
 
               <div className="rounded-xl border p-3">
                 <div className="text-sm font-medium">Mensagens</div>
+
                 <div className="mt-2 space-y-2">
                   {unreadCount > 0 ? (
-                    <Button type="button" variant="outline" className="w-full" onClick={() => markAllAsRead.mutate()}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full"
+                      onClick={() => markAllAsRead.mutate()}
+                    >
                       <Check className="w-4 h-4 mr-2" />
                       Marcar todas como lidas
                     </Button>
@@ -787,18 +976,27 @@ export default function UserNotifications() {
 
                   <AlertDialog>
                     <AlertDialogTrigger asChild>
-                      <Button type="button" variant="destructive" className="w-full" disabled={clearAll.isPending}>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        className="w-full"
+                        disabled={clearAll.isPending}
+                      >
                         <Trash2 className="w-4 h-4 mr-2" />
                         {clearAll.isPending ? "Apagando…" : "Apagar todas as mensagens"}
                       </Button>
                     </AlertDialogTrigger>
+
                     <AlertDialogContent>
                       <AlertDialogHeader>
-                        <AlertDialogTitle>Apagar todas as mensagens?</AlertDialogTitle>
+                        <AlertDialogTitle>
+                          Apagar todas as mensagens?
+                        </AlertDialogTitle>
                         <AlertDialogDescription>
                           Esta ação é permanente e não pode ser desfeita.
                         </AlertDialogDescription>
                       </AlertDialogHeader>
+
                       <AlertDialogFooter>
                         <AlertDialogCancel>Cancelar</AlertDialogCancel>
                         <AlertDialogAction
