@@ -1,11 +1,10 @@
 // client/src/pages/UserNotifications.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
 import MediaViewer from "@/components/MediaViewer";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -114,6 +113,9 @@ export default function UserNotifications() {
   const [attachmentsNotificationId, setAttachmentsNotificationId] = useState<number | null>(null);
   const [attachmentsTitle, setAttachmentsTitle] = useState<string>("Anexos");
   const [openingDeliveryId, setOpeningDeliveryId] = useState<number | null>(null);
+  const [isMediaPlaying, setIsMediaPlaying] = useState(false);
+
+  const pendingRefreshRef = useRef(false);
 
   const subscription = trpc.tenant.getSubscription.useQuery(undefined, {
     refetchOnWindowFocus: false,
@@ -130,21 +132,40 @@ export default function UserNotifications() {
 
   const inbox = trpc.notifications.inboxList.useQuery(
     { limit: pageSize, offset: 0 },
-    { refetchOnWindowFocus: true, refetchInterval: 5000, staleTime: 2000 }
+    {
+      refetchOnWindowFocus: !isMediaPlaying,
+      refetchInterval: isMediaPlaying ? false : 5000,
+      staleTime: 2000,
+    }
   );
 
   const inboxCountQuery = trpc.notifications.inboxCount.useQuery(undefined, {
-    refetchOnWindowFocus: true,
-    refetchInterval: 5000,
+    refetchOnWindowFocus: !isMediaPlaying,
+    refetchInterval: isMediaPlaying ? false : 5000,
     staleTime: 2000,
   });
 
-  const invalidateInbox = async () => {
+  const invalidateInboxNow = useCallback(async () => {
     await Promise.all([
       utils.notifications.inboxList.invalidate(),
       utils.notifications.inboxCount.invalidate(),
     ]);
-  };
+  }, [utils]);
+
+  const invalidateInbox = useCallback(async () => {
+    if (isMediaPlaying) {
+      pendingRefreshRef.current = true;
+      return;
+    }
+    await invalidateInboxNow();
+  }, [invalidateInboxNow, isMediaPlaying]);
+
+  useEffect(() => {
+    if (!isMediaPlaying && pendingRefreshRef.current) {
+      pendingRefreshRef.current = false;
+      void invalidateInboxNow();
+    }
+  }, [isMediaPlaying, invalidateInboxNow]);
 
   const markAsRead = trpc.notifications.markAsRead.useMutation({
     onSuccess: invalidateInbox,
@@ -159,7 +180,11 @@ export default function UserNotifications() {
 
   const setFeedback = trpc.notifications.setFeedback.useMutation({
     onSuccess: async () => {
-      await utils.notifications.inboxList.invalidate();
+      if (isMediaPlaying) {
+        pendingRefreshRef.current = true;
+      } else {
+        await utils.notifications.inboxList.invalidate();
+      }
       toast.success("Resposta enviada.");
     },
   });
@@ -186,6 +211,7 @@ export default function UserNotifications() {
 
   const items = useMemo(() => inbox.data?.data ?? [], [inbox.data]);
   const unreadCount = inboxCountQuery.data?.count ?? items.filter((m: any) => !m.isRead).length;
+
   const visibleItems = useMemo(() => {
     if (filter === "all") return items;
     return items.filter((m: any) => !m.isRead);
@@ -215,6 +241,35 @@ export default function UserNotifications() {
 
     el.addEventListener("scroll", onScroll);
     return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const root = containerRef.current;
+    if (!root) return;
+
+    const syncPlayingState = () => {
+      const anyPlaying = Array.from(root.querySelectorAll("video")).some(
+        (v) => !v.paused && !v.ended && v.readyState > 2
+      );
+      setIsMediaPlaying(anyPlaying);
+    };
+
+    const handlePlay = () => setIsMediaPlaying(true);
+    const handlePauseLike = () => syncPlayingState();
+
+    root.addEventListener("play", handlePlay, true);
+    root.addEventListener("playing", handlePlay, true);
+    root.addEventListener("pause", handlePauseLike, true);
+    root.addEventListener("ended", handlePauseLike, true);
+    root.addEventListener("emptied", handlePauseLike, true);
+
+    return () => {
+      root.removeEventListener("play", handlePlay, true);
+      root.removeEventListener("playing", handlePlay, true);
+      root.removeEventListener("pause", handlePauseLike, true);
+      root.removeEventListener("ended", handlePauseLike, true);
+      root.removeEventListener("emptied", handlePauseLike, true);
+    };
   }, []);
 
   useEffect(() => {
@@ -261,9 +316,9 @@ export default function UserNotifications() {
         }
       } catch {}
 
-      if (!showNewIndicator) scrollToTop();
+      if (!showNewIndicator && !isMediaPlaying) scrollToTop();
     }
-  }, [items, pushPrefs, showNewIndicator]);
+  }, [items, pushPrefs, showNewIndicator, isMediaPlaying]);
 
   useEffect(() => {
     if (typeof unreadCount !== "number") return;
@@ -286,7 +341,7 @@ export default function UserNotifications() {
 
     navigator.serviceWorker.addEventListener("message", onMsg);
     return () => navigator.serviceWorker.removeEventListener("message", onMsg);
-  }, [utils.notifications.inboxCount, utils.notifications.inboxList]);
+  }, [invalidateInbox]);
 
   useEffect(() => {
     const onVisible = () => {
@@ -302,7 +357,7 @@ export default function UserNotifications() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onFocus);
     };
-  }, [utils.notifications.inboxCount, utils.notifications.inboxList]);
+  }, [invalidateInbox]);
 
   useEffect(() => {
     savePushPrefs(pushPrefs);
