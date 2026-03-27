@@ -27,6 +27,7 @@ export default function MediaViewer({
   const inlineVideoRef = useRef<HTMLVideoElement | null>(null);
   const [autoPlayTried, setAutoPlayTried] = useState(false);
   const [inlineControls, setInlineControls] = useState(false);
+  const [isInlinePlaying, setIsInlinePlaying] = useState(false);
 
   // 🔥 Detecta fileKey (uploads/...) e resolve para URL assinada
   const isFileKey = Boolean(url && url.startsWith("uploads/"));
@@ -35,8 +36,6 @@ export default function MediaViewer({
   const signedUrlQuery = trpc.upload.getFileUrl.useQuery(
     { fileKey: fileKey ?? "uploads/__invalid__" },
     {
-      // ✅ DEV + PRODUÇÃO: sempre usar URL assinada direta do storage (inclui vídeos)
-      // Evita proxy same-origin que quebra streaming/Range no Netlify Dev.
       enabled: Boolean(fileKey),
       staleTime: 1000 * 60 * 5,
       refetchOnWindowFocus: false,
@@ -45,30 +44,37 @@ export default function MediaViewer({
 
   const resolvedUrl = useMemo(() => {
     if (isFileKey && fileKey) {
-      // ✅ Imagem e vídeo: URL direta assinada (S3 já suporta Range/206)
       return signedUrlQuery.data?.url;
     }
     return url;
   }, [isFileKey, fileKey, signedUrlQuery.data?.url, url]);
 
-  // ✅ Se for proxy (/api/media?...), detecta pelo fileKey para não falhar
   const video = isFileKey && fileKey ? isVideo(fileKey) : isVideo(resolvedUrl);
 
-  // ✅ Vídeo precisa tocar mesmo quando estiver dentro de outro modal.
-  // Em alguns cenários (PWA / nested dialog), abrir o fullscreen pode parecer que "não aconteceu nada".
-  // Então, no preview, ao clicar, ativamos controls e damos play.
   const playInlineVideo = () => {
     setInlineControls(true);
     const el = inlineVideoRef.current;
     if (!el) return;
-    el.play().catch(() => {
-      // Se bloquear, pelo menos os controls ficam visíveis para o usuário iniciar.
-      setInlineControls(true);
-    });
+
+    const playPromise = el.play();
+    if (playPromise && typeof playPromise.catch === "function") {
+      playPromise.catch(() => {
+        setInlineControls(true);
+      });
+    }
   };
 
-  // ✅ Ao abrir, tenta tocar (muted) para evitar bloqueio de autoplay com som.
-  // Se bloquear, controles ficam para o usuário clicar.
+  const toggleInlineVideo = () => {
+    const el = inlineVideoRef.current;
+    if (!el) return;
+
+    if (el.paused) {
+      playInlineVideo();
+    } else {
+      el.pause();
+    }
+  };
+
   useEffect(() => {
     if (!open || !video) return;
     const el = videoRef.current;
@@ -96,7 +102,6 @@ export default function MediaViewer({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open]);
 
-  // 🔥 Loading/erro somente quando é fileKey
   if (isFileKey && !resolvedUrl) {
     if (signedUrlQuery.isError) {
       return (
@@ -106,7 +111,6 @@ export default function MediaViewer({
       );
     }
 
-    // mantém espaço do preview, sem quebrar layout
     return <div className="h-28 w-28 rounded-md bg-white/5" />;
   }
 
@@ -114,7 +118,6 @@ export default function MediaViewer({
 
   return (
     <>
-      {/* preview estilo WhatsApp */}
       <div
         role="button"
         tabIndex={0}
@@ -125,7 +128,7 @@ export default function MediaViewer({
         onClick={(e) => {
           e.stopPropagation();
           if (video) {
-            playInlineVideo();
+            toggleInlineVideo();
             return;
           }
           setOpen(true);
@@ -135,7 +138,7 @@ export default function MediaViewer({
             e.preventDefault();
             e.stopPropagation();
             if (video) {
-              playInlineVideo();
+              toggleInlineVideo();
               return;
             }
             setOpen(true);
@@ -144,7 +147,7 @@ export default function MediaViewer({
         aria-label={title ? `Abrir mídia: ${title}` : "Abrir mídia"}
       >
         {video ? (
-          <div className="w-full flex items-center justify-center">
+          <div className="w-full flex items-center justify-center relative">
             <video
               ref={inlineVideoRef}
               src={resolvedUrl}
@@ -153,20 +156,21 @@ export default function MediaViewer({
               playsInline
               controls={inlineControls}
               onClick={(e) => {
-                // permite play/pause direto no preview
                 e.stopPropagation();
-                const el = inlineVideoRef.current;
-                if (!el) return;
-                if (el.paused) playInlineVideo();
-                else el.pause();
+                toggleInlineVideo();
               }}
+              onPlay={() => setIsInlinePlaying(true)}
+              onPause={() => setIsInlinePlaying(false)}
+              onEnded={() => setIsInlinePlaying(false)}
             />
-            {/* ▶️ indicador de vídeo (preview sem controls) */}
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <div className="rounded-full bg-black/55 p-3 ring-1 ring-white/30">
-                <Play className="w-8 h-8 text-white" />
+
+            {!inlineControls && !isInlinePlaying && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="rounded-full bg-black/55 p-3 ring-1 ring-white/30">
+                  <Play className="w-8 h-8 text-white" />
+                </div>
               </div>
-            </div>
+            )}
           </div>
         ) : (
           <img
@@ -179,7 +183,6 @@ export default function MediaViewer({
         )}
       </div>
 
-      {/* fullscreen (somente imagem) */}
       {open && (
         <div
           className="fixed inset-0 z-[9999] bg-black flex items-center justify-center"
