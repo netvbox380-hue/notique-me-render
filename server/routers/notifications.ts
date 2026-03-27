@@ -21,7 +21,6 @@ import { storageGet } from "../storage";
 import { assertRateLimit } from "../_core/rateLimit";
 import { assertTenantInScopeOrThrow } from "../_core/ownership";
 
-
 function requireTenant(ctx: any): number {
   const t = ctx.user?.tenantId;
   if (!t) throw new TRPCError({ code: "FORBIDDEN", message: "Sem tenant" });
@@ -160,8 +159,7 @@ async function attachFilesToNotifications<
     // ✅ sempre expõe um "url" utilizável:
     // - se for uploads/... devolve o fileKey (o front resolve: imagem -> signed; vídeo -> proxy)
     // - senão, devolve a url já gravada
-    const usableUrl =
-      key && key.startsWith("uploads/") ? key : url;
+    const usableUrl = key && key.startsWith("uploads/") ? key : url;
 
     byNotif.get(nid)!.push({
       id: (f as any).id,
@@ -180,7 +178,6 @@ async function attachFilesToNotifications<
     return { ...r, attachments };
   });
 }
-
 
 /**
  * ✅ Envia push por usuário com badgeCount individual.
@@ -238,7 +235,6 @@ async function sendPushToUsersWithBadge(
   );
 }
 
-
 async function resolveNotificationRecipientIds(
   db: any,
   actor: any,
@@ -261,7 +257,9 @@ async function resolveNotificationRecipientIds(
     return Array.from(new Set(rows.map((r: any) => Number(r.id)).filter((n: number) => Number.isFinite(n))));
   }
 
-  const normalizedTargetIds = Array.from(new Set((targetIds ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id))));
+  const normalizedTargetIds = Array.from(
+    new Set((targetIds ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id)))
+  );
   if (!normalizedTargetIds.length) return [];
 
   if (targetType === "users") {
@@ -271,7 +269,12 @@ async function resolveNotificationRecipientIds(
       .where(
         isOwner
           ? and(eq(users.tenantId, tenantId), eq(users.role, "user"), inArray(users.id, normalizedTargetIds))
-          : and(eq(users.tenantId, tenantId), eq(users.role, "user"), eq(users.createdByAdminId, actorId), inArray(users.id, normalizedTargetIds))
+          : and(
+              eq(users.tenantId, tenantId),
+              eq(users.role, "user"),
+              eq(users.createdByAdminId, actorId),
+              inArray(users.id, normalizedTargetIds)
+            )
       );
     return Array.from(new Set(rows.map((r: any) => Number(r.id)).filter((n: number) => Number.isFinite(n))));
   }
@@ -289,7 +292,9 @@ async function resolveNotificationRecipientIds(
         )
       );
 
-    return Array.from(new Set(members.map((m: any) => Number(m.userId)).filter((n: number) => Number.isFinite(n))));
+    return Array.from(
+      new Set(members.map((m: any) => Number(m.userId)).filter((n: number) => Number.isFinite(n)))
+    );
   }
 
   const members = await db
@@ -353,7 +358,6 @@ export const notificationsRouter = router({
         .offset(input.offset);
 
       const dataBase = await resolveRowsMedia(dataRaw as any);
-
       const dataWithAttachments = await attachFilesToNotifications(dataBase as any);
 
       const notificationIds = dataWithAttachments
@@ -406,7 +410,9 @@ export const notificationsRouter = router({
       ]);
 
       const userById = new Map((targetUsers as any[]).map((u: any) => [Number(u.id), u]));
-      const groupById = new Map((targetGroups as any[]).map((g: any) => [Number(g.id), String(g.name || `Grupo #${g.id}`)]));
+      const groupById = new Map(
+        (targetGroups as any[]).map((g: any) => [Number(g.id), String(g.name || `Grupo #${g.id}`)])
+      );
       const deliveryByNotification = new Map<number, any[]>();
       for (const row of deliveryRows as any[]) {
         const nid = Number(row.notificationId);
@@ -415,24 +421,34 @@ export const notificationsRouter = router({
       }
 
       const data = dataWithAttachments.map((n: any) => {
-        const ids = Array.isArray(n.targetIds) ? n.targetIds.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id)) : [];
+        const ids = Array.isArray(n.targetIds)
+          ? n.targetIds.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id))
+          : [];
         const targetType = String(n.targetType || "all");
-        const targetUsersResolved = targetType === "users" ? ids.map((id: number) => userById.get(id)).filter(Boolean) : [];
-        const groupNames = targetType === "groups" ? ids.map((id: number) => groupById.get(id) || `Grupo #${id}`) : [];
-        const singleRecipient = targetType === "users" && targetUsersResolved.length === 1
-          ? {
-              id: Number((targetUsersResolved[0] as any).id),
-              name: String((targetUsersResolved[0] as any).name || (targetUsersResolved[0] as any).openId || (targetUsersResolved[0] as any).email || `Usuário #${(targetUsersResolved[0] as any).id}`),
-              email: (targetUsersResolved[0] as any).email || null,
-              openId: (targetUsersResolved[0] as any).openId || null,
-            }
-          : null;
+        const targetUsersResolved =
+          targetType === "users" ? ids.map((id: number) => userById.get(id)).filter(Boolean) : [];
+        const groupNames =
+          targetType === "groups" ? ids.map((id: number) => groupById.get(id) || `Grupo #${id}`) : [];
+        const singleRecipient =
+          targetType === "users" && targetUsersResolved.length === 1
+            ? {
+                id: Number((targetUsersResolved[0] as any).id),
+                name: String(
+                  (targetUsersResolved[0] as any).name ||
+                    (targetUsersResolved[0] as any).openId ||
+                    (targetUsersResolved[0] as any).email ||
+                    `Usuário #${(targetUsersResolved[0] as any).id}`
+                ),
+                email: (targetUsersResolved[0] as any).email || null,
+                openId: (targetUsersResolved[0] as any).openId || null,
+              }
+            : null;
 
         const recipientLabel = singleRecipient
           ? singleRecipient.name
           : targetType === "groups" && groupNames.length === 1
-          ? `users grupo ${groupNames[0]}`
-          : "users";
+            ? `users grupo ${groupNames[0]}`
+            : "users";
 
         const drows = deliveryByNotification.get(Number(n.id)) || [];
         const delivered = drows.length;
@@ -524,23 +540,25 @@ export const notificationsRouter = router({
               input.mode === "all"
                 ? sql`true`
                 : input.mode === "older_than_days" && cutoff
-                ? sql`${notifications.createdAt} < ${cutoff as any}`
-                : input.mode === "range" && from && to
-                ? sql`${notifications.createdAt} >= ${from as any} AND ${notifications.createdAt} <= ${to as any}`
-                : sql`false`
+                  ? sql`${notifications.createdAt} < ${cutoff as any}`
+                  : input.mode === "range" && from && to
+                    ? sql`${notifications.createdAt} >= ${from as any} AND ${notifications.createdAt} <= ${to as any}`
+                    : sql`false`
             ) as any
           )
           .orderBy(sql`${notifications.id} ASC`)
           .limit(input.batchSize);
 
-        const ids = (idsRows as any[]).map((r) => Number(r.id)).filter((n) => Number.isFinite(n));
+        const ids = (idsRows as any[])
+          .map((r) => Number(r.id))
+          .filter((n) => Number.isFinite(n));
         if (!ids.length) {
           done = true;
           break;
         }
 
         // apaga deliveries primeiro
-        const delDeliveries = await db
+        await db
           .delete(deliveries)
           .where(and(eq(deliveries.tenantId, tenantId), inArray(deliveries.notificationId, ids)));
 
@@ -686,7 +704,6 @@ export const notificationsRouter = router({
       return { byId };
     }),
 
-
   send: adminOnlyProcedure
     .input(
       z.object({
@@ -732,7 +749,6 @@ export const notificationsRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Nenhum destinatário" });
       }
 
-      
       /* CREDITS_LIMITS */
       // ✅ Rate limit (envio)
       await assertRateLimit({ req: ctx.req, key: "notifications.send", limit: 30, windowMs: 60_000 });
@@ -888,7 +904,6 @@ export const notificationsRouter = router({
           );
       }
 
-
       await db.insert(deliveries).values(
         userIds.map((uid) => ({
           tenantId,
@@ -941,10 +956,14 @@ export const notificationsRouter = router({
         .limit(input.limit)
         .offset(input.offset);
 
-      const rowsBase = await resolveRowsMedia(rowsRaw as any);
-const rows = await attachFilesToNotifications(rowsBase as any);
+      // ✅ IMPORTANTE:
+      // No inbox do usuário comum, NÃO resolver uploads/... para signed URL aqui.
+      // O front decide:
+      // - imagem -> signed URL
+      // - vídeo  -> proxy /api/media
+      const rows = await attachFilesToNotifications(rowsRaw as any);
 
-return { data: rows };
+      return { data: rows };
     }),
 
   inboxCount: protectedProcedure.query(async ({ ctx }) => {
@@ -970,8 +989,6 @@ return { data: rows };
 
       return { success: true };
     }),
-
-
 
   markAllAsRead: protectedProcedure
     .mutation(async ({ ctx }) => {
