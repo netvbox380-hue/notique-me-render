@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Play, X } from "lucide-react";
+import { Expand, Play, X } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 
 function isVideo(url?: string) {
@@ -9,7 +9,8 @@ function isVideo(url?: string) {
     u.includes(".mp4") ||
     u.includes(".webm") ||
     u.includes(".ogg") ||
-    u.includes(".mov")
+    u.includes(".mov") ||
+    u.includes(".m4v")
   );
 }
 
@@ -23,13 +24,13 @@ export default function MediaViewer({
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const inlineVideoRef = useRef<HTMLVideoElement | null>(null);
-  const [autoPlayTried, setAutoPlayTried] = useState(false);
   const [inlineControls, setInlineControls] = useState(false);
   const [isInlinePlaying, setIsInlinePlaying] = useState(false);
+  const [isInlineMuted] = useState(true);
 
-  // 🔥 Detecta fileKey (uploads/...) e resolve para URL assinada
+  const inlineVideoRef = useRef<HTMLVideoElement | null>(null);
+  const modalVideoRef = useRef<HTMLVideoElement | null>(null);
+
   const isFileKey = Boolean(url && url.startsWith("uploads/"));
   const fileKey = isFileKey ? (url as string) : undefined;
 
@@ -52,9 +53,11 @@ export default function MediaViewer({
   const video = isFileKey && fileKey ? isVideo(fileKey) : isVideo(resolvedUrl);
 
   const playInlineVideo = () => {
-    setInlineControls(true);
     const el = inlineVideoRef.current;
     if (!el) return;
+
+    setInlineControls(true);
+    el.muted = isInlineMuted;
 
     const playPromise = el.play();
     if (playPromise && typeof playPromise.catch === "function") {
@@ -64,32 +67,38 @@ export default function MediaViewer({
     }
   };
 
+  const pauseInlineVideo = () => {
+    const el = inlineVideoRef.current;
+    if (!el) return;
+    el.pause();
+  };
+
   const toggleInlineVideo = () => {
     const el = inlineVideoRef.current;
     if (!el) return;
 
-    if (el.paused) {
+    if (el.paused || el.ended) {
       playInlineVideo();
     } else {
-      el.pause();
+      pauseInlineVideo();
     }
   };
 
   useEffect(() => {
     if (!open || !video) return;
-    const el = videoRef.current;
+    const el = modalVideoRef.current;
     if (!el) return;
-    if (autoPlayTried) return;
 
-    setAutoPlayTried(true);
-    el.muted = true;
+    el.currentTime = 0;
+    el.muted = false;
+
     const p = el.play();
-    if (p && typeof (p as any).catch === "function") {
-      (p as Promise<void>).catch(() => {
-        // noop
+    if (p && typeof p.catch === "function") {
+      p.catch(() => {
+        // autoplay com som pode ser bloqueado pelo navegador
       });
     }
-  }, [open, video, autoPlayTried]);
+  }, [open, video]);
 
   useEffect(() => {
     if (!open) return;
@@ -100,6 +109,17 @@ export default function MediaViewer({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open]);
+
+  useEffect(() => {
+    if (open) return;
+
+    const el = modalVideoRef.current;
+    if (el) {
+      try {
+        el.pause();
+      } catch {}
+    }
   }, [open]);
 
   if (isFileKey && !resolvedUrl) {
@@ -119,41 +139,20 @@ export default function MediaViewer({
   return (
     <>
       <div
-        role="button"
-        tabIndex={0}
         className={[
-          "mt-3 w-full rounded-xl overflow-hidden cursor-zoom-in select-none bg-black/20 flex items-center justify-center relative",
+          "mt-3 w-full rounded-xl overflow-hidden bg-black/20 relative",
           className ?? "",
         ].join(" ")}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (video) {
-            toggleInlineVideo();
-            return;
-          }
-          setOpen(true);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            e.stopPropagation();
-            if (video) {
-              toggleInlineVideo();
-              return;
-            }
-            setOpen(true);
-          }
-        }}
-        aria-label={title ? `Abrir mídia: ${title}` : "Abrir mídia"}
       >
         {video ? (
-          <div className="w-full flex items-center justify-center relative">
+          <div className="relative w-full flex items-center justify-center">
             <video
               ref={inlineVideoRef}
               src={resolvedUrl}
-              className="w-full max-h-[420px] object-contain"
+              className="w-full max-h-[420px] object-contain bg-black"
               preload="metadata"
               playsInline
+              muted={isInlineMuted}
               controls={inlineControls}
               onClick={(e) => {
                 e.stopPropagation();
@@ -165,27 +164,56 @@ export default function MediaViewer({
             />
 
             {!inlineControls && !isInlinePlaying && (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <button
+                type="button"
+                className="absolute inset-0 flex items-center justify-center"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  playInlineVideo();
+                }}
+                aria-label="Reproduzir vídeo"
+              >
                 <div className="rounded-full bg-black/55 p-3 ring-1 ring-white/30">
                   <Play className="w-8 h-8 text-white" />
                 </div>
-              </div>
+              </button>
             )}
+
+            <button
+              type="button"
+              className="absolute top-2 right-2 rounded-full bg-black/60 p-2 text-white hover:bg-black/75"
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen(true);
+              }}
+              aria-label="Expandir vídeo"
+            >
+              <Expand className="w-4 h-4" />
+            </button>
           </div>
         ) : (
-          <img
-            src={resolvedUrl}
-            alt={title || "Anexo"}
-            className="w-full max-h-[420px] object-contain"
-            loading="lazy"
-            onClick={(e) => e.stopPropagation()}
-          />
+          <button
+            type="button"
+            className="block w-full cursor-zoom-in"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(true);
+            }}
+            aria-label={title ? `Abrir imagem: ${title}` : "Abrir imagem"}
+          >
+            <img
+              src={resolvedUrl}
+              alt={title || "Anexo"}
+              className="w-full max-h-[420px] object-contain"
+              loading="lazy"
+            />
+          </button>
         )}
       </div>
 
       {open && (
         <div
-          className="fixed inset-0 z-[9999] bg-black flex items-center justify-center"
+          className="fixed inset-0 z-[9999] bg-black/95 flex items-center justify-center"
           onClick={() => setOpen(false)}
         >
           <button
@@ -201,10 +229,18 @@ export default function MediaViewer({
           </button>
 
           <div
-            className="w-full h-full flex items-center justify-center p-2"
+            className="w-full h-full flex items-center justify-center p-3 sm:p-6"
             onClick={(e) => e.stopPropagation()}
           >
-            {video ? null : (
+            {video ? (
+              <video
+                ref={modalVideoRef}
+                src={resolvedUrl}
+                className="max-w-full max-h-full object-contain bg-black rounded-lg"
+                controls
+                playsInline
+              />
+            ) : (
               <img
                 src={resolvedUrl}
                 alt={title || "Anexo"}
