@@ -14,6 +14,11 @@ function isVideo(url?: string) {
   );
 }
 
+function buildVideoProxyUrl(fileKey?: string) {
+  if (!fileKey) return undefined;
+  return `/api/media?fileKey=${encodeURIComponent(fileKey)}`;
+}
+
 export default function MediaViewer({
   url,
   title,
@@ -33,11 +38,12 @@ export default function MediaViewer({
 
   const isFileKey = Boolean(url && url.startsWith("uploads/"));
   const fileKey = isFileKey ? (url as string) : undefined;
+  const fileKeyIsVideo = isVideo(fileKey);
 
   const signedUrlQuery = trpc.upload.getFileUrl.useQuery(
     { fileKey: fileKey ?? "uploads/__invalid__" },
     {
-      enabled: Boolean(fileKey),
+      enabled: Boolean(fileKey && !fileKeyIsVideo),
       staleTime: 1000 * 60 * 5,
       refetchOnWindowFocus: false,
     }
@@ -45,10 +51,13 @@ export default function MediaViewer({
 
   const resolvedUrl = useMemo(() => {
     if (isFileKey && fileKey) {
+      if (fileKeyIsVideo) {
+        return buildVideoProxyUrl(fileKey);
+      }
       return signedUrlQuery.data?.url;
     }
     return url;
-  }, [isFileKey, fileKey, signedUrlQuery.data?.url, url]);
+  }, [isFileKey, fileKey, fileKeyIsVideo, signedUrlQuery.data?.url, url]);
 
   const video = isFileKey && fileKey ? isVideo(fileKey) : isVideo(resolvedUrl);
 
